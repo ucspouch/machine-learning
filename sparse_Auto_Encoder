@@ -1,0 +1,274 @@
+import scipy.io as sio
+import scipy
+import numpy as np
+import matplotlib.pyplot as plt
+import scipy.optimize as opt
+
+
+'''
+step 1:sampleImages  ///////////////////////////////////////////////////////////
+
+'''
+
+
+def normalizeData(sample):
+        sample = sample - np.mean(sample)
+        
+        pstd = 3 * np.std(sample)
+        
+        sample = np.maximum(np.minimum(sample,pstd),-pstd) / pstd
+        
+        sample = (sample + 1) * 0.4 + 0.1
+        
+        return sample
+    
+def sampleIMAGES(patch_size,num):
+        images = sio.loadmat('IMAGES.mat')
+        images = images['IMAGES']
+#        print(images[:][:][0])
+        print('data shape:',images.shape)    
+        
+        sample = np.zeros((num, patch_size * patch_size))
+        
+        for i in range(0,num):
+            patch_r = np.random.randint(512-patch_size)
+            Image_r = np.random.randint(10)
+            patch = images[patch_r:patch_r+patch_size,patch_r:patch_r+patch_size,Image_r]
+            sample[i] = patch.flatten()
+            
+#        sample = sample.reshape((num, patch_size * patch_size))
+        sample = normalizeData(sample)
+#        print(sample)
+        return sample
+        
+
+'''
+step 2: SparseAutoencoderCost  ///////////////////////////////////////////////////////////
+'''
+
+
+def KL_divergence(p,pj):
+    
+    return p * np.log(p / pj) + (1 - p) * np.log((1 - p) / (1 - pj))
+    
+def sigmoid(x):
+    
+    return (1.0/(1 + np.exp(-x)))
+
+def sigDerive(x):
+    
+    return sigmoid(x) * ( 1.0 - sigmoid(x) )
+
+def KLDerive(rho, rho_j, num):
+    
+    return np.tile(- rho / rho_j + (1 - rho) / (1 - rho_j), (num, 1)).transpose()
+
+ 
+def initializeParameters(hiddenSize, visibleSize):
+    r  = (6 ** 0.5) / ((hiddenSize+visibleSize+1) ** 0.5)
+    w1 = np.random.random((hiddenSize,visibleSize)) * 2 * r - r
+    w2 = np.random.random((visibleSize,hiddenSize)) * 2 * r - r
+    b1 = np.zeros(hiddenSize, dtype=np.float64)
+    b2 = np.zeros(visibleSize, dtype=np.float64)
+    
+    theta = np.concatenate((w1.flatten(), w2.flatten(), b1.flatten(), b2.flatten()))
+    
+    return theta
+
+
+#print(theta)
+    
+def sparse_autoEncoder(theta,visibleSize,hiddenSize,_lambda,sparsityParam,beta,data):
+#    visbleSize:the number of input units
+#    hiddenSize:the number of hidden units
+#    lambda:weight decay parameter
+#    beta: weight of sparsity penalty term
+#    data:our 64*10000 matrix containing the training dataset
+#    theta:a vector (w1,w2,b1,b2)matrix/vector format
+    num = data.shape[1]
+    w1 = theta[0 : hiddenSize * visibleSize].reshape(hiddenSize,visibleSize)
+    w2 = theta[hiddenSize * visibleSize : 2 * hiddenSize * visibleSize].reshape(visibleSize,hiddenSize)
+    b1 = theta[2 * hiddenSize * visibleSize : 2 * hiddenSize * visibleSize + hiddenSize].reshape(hiddenSize,1)
+    b2 = theta[2 * hiddenSize * visibleSize + hiddenSize : ].reshape(visibleSize,1)
+    
+    w1grad = np.zeros((w1.shape))
+    w2grad = np.zeros((w2.shape))
+    b1grad = np.zeros(b1.size)
+    b2grad = np.zeros(b2.size)
+    
+#forward propagation
+    a1 = data
+    z2 = w1.dot(a1) + b1
+    a2 = sigmoid(z2)
+    z3 = w2.dot(a2) + b2
+    a3 = sigmoid(z3)
+    
+    
+#cost  
+    
+    rho = sparsityParam
+    rho_j = np.mean(a2, axis =1)
+    sp_delta = (-rho/rho_j + (1.0-rho)/(1-rho_j)).reshape((-1, 1))
+    
+    
+    MSE = np.sum((a1 - a3) ** 2) / (2 * num)
+    regularization = 1/2 * _lambda * (np.sum(w1 ** 2) + np.sum(w2 ** 2)) 
+    penalty = beta * np.sum(KL_divergence(rho,rho_j))
+    
+    cost = MSE + regularization + penalty
+ 
+#back propagation 
+    
+#    delta_sp = KLDerive(rho, rho_j, num)
+    delta_3 = (a3 - a1) * sigDerive(z3)
+    delta_2 = (w2.T.dot(delta_3) + beta * sp_delta) * sigDerive(z2)
+    
+    w1grad = delta_2.dot(a1.T) / num + _lambda * w1
+    w2grad = delta_3.dot(a2.T) / num + _lambda * w2
+    b1grad = np.sum(delta_2, axis = 1) / num
+    b2grad = np.sum(delta_3, axis = 1) / num
+    
+    grad = np.concatenate(( w1grad.flatten(), w2grad.flatten(), b1grad.flatten(), b2.flatten() ))
+    
+    return cost,grad
+
+'''
+step 3: Gradient Checking  ///////////////////////////////////////////////////////////
+'''
+
+def simpleQuadraticFunction(x):
+    value = x[0] ** 2 + 3 * x[0] * x[1]
+    
+    grad = np.array([0.0 , 0.0])
+    grad[0] = 2 * x[0] + 3 * x[1]
+    grad[1] = 3 * x[0]
+    grad = grad.reshape((2,1))
+    
+    return value, grad
+
+def computeNumericalGradient(J, theta):
+    eps = 1e-5
+    
+    
+    numgrad = np.zeros(theta.shape)
+    
+    for i in range(theta.shape[0]):
+        J_pos = np.array(theta, dtype = np.float64)
+        J_neg = np.array(theta, dtype = np.float64)
+
+        J_pos[i] = theta[i] + eps
+        J_neg[i] = theta[i] - eps
+ 
+    numgrad[i] = (J(J_pos)[0] - J(J_neg)[0]) / (2 * eps)         
+
+    
+    return numgrad
+    
+    
+   
+def checkNumericalGradient(grad, numgrad):
+    x = np.array([4,10])  
+    value, grad = simpleQuadraticFunction(x)
+    
+    numgrad = computeNumericalGradient(simpleQuadraticFunction, x)
+    diff = np.linalg.norm(numgrad - grad) / np.linalg.norm(grad + numgrad)
+    
+    print('diff:',diff)
+    print('Norm of the difference between numerical and analytical gradient (should be < 1e-9)\n\n')
+
+
+'''
+step 4:Train
+'''
+def display_network(A):
+    A = A - np.mean(A)
+    L, M = A.shape
+    sz = int(L ** 0.5)
+    col = int(np.ceil(M ** 0.5))
+    row = int(np.ceil(M /col ))
+    figure, axes = plt.subplots(nrows = row, ncols = col)
+    
+    k = 0 
+    for axis in axes.flat:
+        axis.set_frame_on(False)
+        axis.set_axis_off()
+        if(k >= M):
+            continue
+        axis.imshow(A[:, k].reshape(sz,sz), cmap = plt.cm.gray, interpolation = 'nearest')
+        k += 1
+        
+    plt.show()
+            
+
+
+def train():    
+    visibleSize = 8 * 8
+    hiddenSize = 25
+    sparsityParam = 0.01
+    _lambda = 1e-4
+    beta = 3
+    maxIter = 400
+    display = True
+    '''
+    sampleImage
+    '''
+    patches = sampleIMAGES(8,10000)
+    patches = patches.transpose()
+    print('sampleImage shape:',patches.shape)
+    display_network(patches[:,0:145])
+    
+    '''
+    sparseAutoEncoder
+    '''
+    theta = initializeParameters(hiddenSize,visibleSize)
+    
+    cost, grad = sparse_autoEncoder(theta, visibleSize, hiddenSize, _lambda, sparsityParam, beta, patches)
+    print('cost:',cost,'\ngrad:', grad,'\n')
+    
+    
+    
+    J = lambda x: sparse_autoEncoder(x, visibleSize, hiddenSize, _lambda, sparsityParam, beta, patches)
+#    numgrad = computeNumericalGradient(J, theta)
+#    '''
+#    check_gradient
+#    '''
+#    numgrad = computeNumericalGradient(J, theta)
+#    
+#    print('a\n',numgrad)
+#    debug_flag = False
+#    
+#    if(debug_flag):
+#        x = np.array([4,10])
+#        value, grad = simpleQuadraticFunction(x)
+#        
+#        checkNumericalGradient(grad, numgrad)
+#    
+#    else:
+#        checkNumericalGradient(grad, numgrad)
+#    
+    '''
+    optimize
+    '''
+    option = {'maxiter':maxIter, 'disp':display}
+    result =opt.minimize(J, theta, method='l-bfgs-b', jac=True, options=option)
+    result_theta = result['x']
+    
+    display_network(result_theta[0:hiddenSize * visibleSize].reshape(hiddenSize, visibleSize).T)
+    print(result)
+    
+    return result
+
+
+
+train()
+
+
+
+
+ 
+    
+    
+    
+    
+    
+    
